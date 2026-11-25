@@ -1,0 +1,6 @@
+{
+  "name": "OpenTTY",
+  "description": "GPU-accelerated terminal emulator in Rust (edition 2024) for native Wayland (KWin) and Vulkan on CachyOS.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
