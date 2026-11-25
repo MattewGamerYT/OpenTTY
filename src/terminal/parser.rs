@@ -67,28 +67,8 @@ impl Perform for Terminal {
 
     fn esc_dispatch(&mut self, intermediates: &[u8], _ignore: bool, byte: u8) {
         match (intermediates, byte) {
-            ([], b'7') => {
-                let grid = self.active_grid_mut();
-                grid.saved_cursor = Some(SavedCursor {
-                    col: grid.cursor.col,
-                    row: grid.cursor.row,
-                    fg: grid.active_fg,
-                    bg: grid.active_bg,
-                    flags: grid.active_flags,
-                });
-            }
-            ([], b'8') => {
-                let grid = self.active_grid_mut();
-                if let Some(saved) = grid.saved_cursor {
-                    grid.cursor.col = saved.col.min(grid.cols.saturating_sub(1));
-                    grid.cursor.row = saved.row.min(grid.rows.saturating_sub(1));
-                    grid.cursor.wrap_pending = false;
-                    grid.active_fg = saved.fg;
-                    grid.active_bg = saved.bg;
-                    grid.active_flags = saved.flags;
-                    self.dirty = true;
-                }
-            }
+            ([], b'7') => self.save_cursor(),
+            ([], b'8') => self.restore_cursor(),
             ([], b'D') => {
                 self.active_grid_mut().linefeed();
                 self.dirty = true;
