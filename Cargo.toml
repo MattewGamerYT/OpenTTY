@@ -14,7 +14,7 @@ fontdue = "0.9"
 log = "0.4"
 nix = { version = "0.29", features = ["fs", "ioctl", "poll", "process", "signal", "term"] }
 vte = "0.14"
-wayland-client = "0.31"
+wayland-client = { version = "0.31", features = ["system", "dlopen", "log"] }
 wayland-protocols = { version = "0.32", features = ["client", "staging", "unstable"] }
 xkbcommon = "0.8"
 

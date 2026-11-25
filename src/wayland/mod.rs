@@ -1,3 +1,5 @@
+pub mod input;
+
 use std::ffi::c_void;
 
 use wayland_client::protocol::{
@@ -14,7 +16,7 @@ use wayland_protocols::xdg::decoration::zv1::client::{
 };
 use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
 
-use super::input::{KeyAction, XkbInput};
+use self::input::{KeyAction, XkbInput};
 
 pub struct WaylandApp {
     pub connection: Connection,

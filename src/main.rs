@@ -5,8 +5,6 @@ mod terminal;
 mod vulkan;
 mod wayland;
 
-use std::os::fd::AsFd;
-
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 
 use crate::config::Config;
