@@ -56,21 +56,25 @@ impl Default for Cell {
 #[derive(Debug, Clone)]
 pub struct Row {
     pub cells: Vec<Cell>,
+    pub wrapped: bool,
 }
 
 impl Row {
     pub fn new(cols: usize) -> Self {
         Self {
             cells: vec![Cell::default(); cols],
+            wrapped: false,
         }
     }
 
     pub fn clear(&mut self, template: Cell) {
         self.cells.fill(template);
+        self.wrapped = false;
     }
 
     pub fn resize(&mut self, cols: usize) {
         self.cells.resize(cols, Cell::default());
+        self.wrapped = false;
     }
 }
 
@@ -167,7 +171,6 @@ impl Grid {
 
         if new_rows < self.rows {
             let excess = self.rows - new_rows;
-            // Push top lines into scrollback when shrinking vertically so prompt stays visible.
             for _ in 0..excess {
                 if self.cursor.row >= new_rows {
                     let evicted = self.lines.remove(0);
@@ -189,6 +192,158 @@ impl Grid {
         self.scroll_bottom = new_rows - 1;
         self.cursor.col = self.cursor.col.min(self.cols - 1);
         self.cursor.row = self.cursor.row.min(self.rows - 1);
+        self.cursor.wrap_pending = false;
+        self.scroll_offset = self.scroll_offset.min(self.scrollback.len());
+    }
+
+    /// Resize primary grid while reflowing soft-wrapped lines across scrollback and viewport.
+    pub fn resize_reflow(&mut self, new_cols: usize, new_rows: usize) {
+        let new_cols = new_cols.max(1);
+        let new_rows = new_rows.max(1);
+
+        if new_cols == self.cols && new_rows == self.rows {
+            return;
+        }
+
+        let default_cell = Cell::default();
+        let last_non_empty = self
+            .lines
+            .iter()
+            .rposition(|r| r.wrapped || r.cells.iter().any(|&c| c != default_cell))
+            .unwrap_or(0);
+        let used_rows = (last_non_empty + 1)
+            .max(self.cursor.row + 1)
+            .min(self.lines.len());
+
+        let sb_len = self.scrollback.len();
+        let cursor_global_row = sb_len + self.cursor.row.min(used_rows.saturating_sub(1));
+        let old_cursor_col = self.cursor.col.min(self.cols.saturating_sub(1));
+
+        let all_rows: Vec<Row> = self
+            .scrollback
+            .drain(..)
+            .chain(self.lines.drain(..used_rows))
+            .collect();
+        self.lines.clear();
+
+        let mut reflowed: Vec<Row> = Vec::with_capacity(all_rows.len());
+        let mut current_line: Vec<Cell> = Vec::new();
+        let mut current_cursor_offset: Option<usize> = None;
+        let mut new_cursor: Option<(usize, usize)> = None;
+
+        let flush_logical_line = |line: &mut Vec<Cell>,
+                                  cursor_off: &mut Option<usize>,
+                                  out: &mut Vec<Row>,
+                                  out_cursor: &mut Option<(usize, usize)>| {
+            let start_row = out.len();
+            if line.is_empty() {
+                out.push(Row::new(new_cols));
+                if let Some(off) = cursor_off.take() {
+                    *out_cursor = Some((start_row, off.min(new_cols - 1)));
+                }
+            } else {
+                let total_chunks = line.len().div_ceil(new_cols);
+                for (chunk_idx, chunk) in line.chunks(new_cols).enumerate() {
+                    let mut row = Row::new(new_cols);
+                    row.cells[..chunk.len()].copy_from_slice(chunk);
+                    row.wrapped = chunk_idx + 1 < total_chunks;
+                    out.push(row);
+                }
+                if let Some(off) = cursor_off.take() {
+                    let chunk_idx = off / new_cols;
+                    if chunk_idx >= total_chunks {
+                        *out_cursor = Some((start_row + total_chunks - 1, new_cols - 1));
+                    } else {
+                        *out_cursor = Some((start_row + chunk_idx, off % new_cols));
+                    }
+                }
+                line.clear();
+            }
+        };
+
+        let total_rows = all_rows.len();
+        for (row_idx, row) in all_rows.into_iter().enumerate() {
+            if row_idx == cursor_global_row {
+                current_cursor_offset = Some(current_line.len() + old_cursor_col);
+            }
+
+            if row.wrapped && row_idx + 1 < total_rows {
+                current_line.extend_from_slice(&row.cells);
+            } else {
+                let mut trim_len = row
+                    .cells
+                    .iter()
+                    .rposition(|&c| c != default_cell)
+                    .map(|i| i + 1)
+                    .unwrap_or(0);
+                if row_idx == cursor_global_row {
+                    trim_len = trim_len.max((old_cursor_col + 1).min(row.cells.len()));
+                }
+                current_line.extend_from_slice(&row.cells[..trim_len]);
+                flush_logical_line(
+                    &mut current_line,
+                    &mut current_cursor_offset,
+                    &mut reflowed,
+                    &mut new_cursor,
+                );
+            }
+        }
+
+        if !current_line.is_empty() || current_cursor_offset.is_some() {
+            flush_logical_line(
+                &mut current_line,
+                &mut current_cursor_offset,
+                &mut reflowed,
+                &mut new_cursor,
+            );
+        }
+
+        if reflowed.len() <= new_rows {
+            self.lines = reflowed;
+            while self.lines.len() < new_rows {
+                self.lines.push(Row::new(new_cols));
+            }
+            if let Some((cr, cc)) = new_cursor {
+                self.cursor.row = cr.min(new_rows - 1);
+                self.cursor.col = cc.min(new_cols - 1);
+            } else {
+                self.cursor.row = 0;
+                self.cursor.col = 0;
+            }
+        } else {
+            let mut screen_start = reflowed.len() - new_rows;
+            if let Some((cr, _)) = new_cursor
+                && cr < screen_start
+            {
+                screen_start = cr;
+            }
+            let mut screen_rows = reflowed.split_off(screen_start);
+            if screen_rows.len() > new_rows {
+                screen_rows.truncate(new_rows);
+            }
+            while screen_rows.len() < new_rows {
+                screen_rows.push(Row::new(new_cols));
+            }
+            self.lines = screen_rows;
+
+            if self.max_scrollback > 0 {
+                let sb_keep_start = reflowed.len().saturating_sub(self.max_scrollback);
+                self.scrollback.extend(reflowed.drain(sb_keep_start..));
+            }
+
+            if let Some((cr, cc)) = new_cursor {
+                self.cursor.row = cr.saturating_sub(screen_start).min(new_rows - 1);
+                self.cursor.col = cc.min(new_cols - 1);
+            } else {
+                self.cursor.row = new_rows - 1;
+                self.cursor.col = 0;
+            }
+        }
+
+        self.cols = new_cols;
+        self.rows = new_rows;
+        self.scroll_top = 0;
+        self.scroll_bottom = new_rows - 1;
         self.cursor.wrap_pending = false;
         self.scroll_offset = self.scroll_offset.min(self.scrollback.len());
     }
@@ -245,6 +400,8 @@ impl Grid {
     pub fn put_char(&mut self, ch: char) {
         self.scroll_offset = 0;
         if self.cursor.wrap_pending {
+            let prev_row = self.cursor.row.min(self.rows - 1);
+            self.lines[prev_row].wrapped = true;
             self.cursor.wrap_pending = false;
             self.cursor.col = 0;
             self.linefeed();

@@ -76,7 +76,7 @@ impl Terminal {
     }
 
     pub fn resize(&mut self, cols: usize, rows: usize) {
-        self.primary.resize(cols, rows);
+        self.primary.resize_reflow(cols, rows);
         self.alternate.resize(cols, rows);
         self.dirty = true;
     }

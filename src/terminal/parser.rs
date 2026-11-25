@@ -231,6 +231,7 @@ impl Perform for Terminal {
                 let c = grid.cursor.col;
                 match mode {
                     0 => {
+                        grid.lines[r].wrapped = false;
                         for cell in &mut grid.lines[r].cells[c..] {
                             *cell = blank;
                         }
@@ -269,6 +270,7 @@ impl Perform for Terminal {
                 let c = grid.cursor.col;
                 match mode {
                     0 => {
+                        grid.lines[r].wrapped = false;
                         for cell in &mut grid.lines[r].cells[c..] {
                             *cell = blank;
                         }
