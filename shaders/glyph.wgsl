@@ -59,11 +59,12 @@ fn vs_main(
     let cell_size = inst.cell_rect.zw;
     let px = cell_origin + corner * cell_size;
 
-    // Vulkan NDC: (-1, -1) top-left, (+1, +1) bottom-right
+    // WGSL NDC has (+1) at top and (-1) at bottom; naga's SPIR-V backend
+    // flips Y via ADJUST_COORDINATE_SPACE for Vulkan clip space.
     let ndc = (px / max(pc.viewport_size, vec2<f32>(1.0, 1.0))) * 2.0 - 1.0;
 
     var out: VertexOutput;
-    out.clip_pos = vec4<f32>(ndc.x, ndc.y, 0.0, 1.0);
+    out.clip_pos = vec4<f32>(ndc.x, -ndc.y, 0.0, 1.0);
     out.local_px = corner * cell_size;
     out.cell_size = cell_size;
     out.glyph_rect = inst.glyph_rect;
