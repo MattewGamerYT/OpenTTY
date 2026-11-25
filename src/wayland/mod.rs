@@ -225,6 +225,7 @@ impl WaylandApp {
             surface.frame(&self.qh, ());
             self.state.frame_pending = true;
         }
+        let _ = self.connection.flush();
     }
 }
 

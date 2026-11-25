@@ -308,16 +308,23 @@ impl VulkanRenderer {
         self.atlas.record_uploads(&self.device, cmd);
 
         let extent = self.swapchain.extent;
+        let is_srgb = is_srgb_format(self.swapchain.format);
         let bg = config.default_bg;
+        let bg_r = ((bg >> 24) & 0xFF) as f32 / 255.0;
+        let bg_g = ((bg >> 16) & 0xFF) as f32 / 255.0;
+        let bg_b = ((bg >> 8) & 0xFF) as f32 / 255.0;
+        let clear_rgb = if is_srgb {
+            [
+                srgb_to_linear(bg_r),
+                srgb_to_linear(bg_g),
+                srgb_to_linear(bg_b),
+                1.0,
+            ]
+        } else {
+            [bg_r, bg_g, bg_b, 1.0]
+        };
         let clear_color = vk::ClearValue {
-            color: vk::ClearColorValue {
-                float32: [
-                    ((bg >> 24) & 0xFF) as f32 / 255.0,
-                    ((bg >> 16) & 0xFF) as f32 / 255.0,
-                    ((bg >> 8) & 0xFF) as f32 / 255.0,
-                    1.0,
-                ],
-            },
+            color: vk::ClearColorValue { float32: clear_rgb },
         };
 
         let rp_begin = vk::RenderPassBeginInfo::default()
@@ -343,6 +350,8 @@ impl VulkanRenderer {
         };
         let push = PushConstants {
             viewport_size: [extent.width as f32, extent.height as f32],
+            is_srgb: u32::from(is_srgb),
+            _pad: 0,
         };
         let push_bytes = unsafe {
             std::slice::from_raw_parts(
@@ -455,6 +464,9 @@ impl VulkanRenderer {
                 let mut bg = resolve_rgba(cell.bg, config.default_fg, config.default_bg);
                 if cell.flags.inverse {
                     std::mem::swap(&mut fg, &mut bg);
+                }
+                if cell.flags.dim {
+                    fg = dim_rgba(fg);
                 }
                 if cell.flags.hidden {
                     fg = bg;
@@ -611,4 +623,29 @@ fn create_instance_buffer(
         as *mut CellInstance;
 
     Ok((buffer, memory, ptr))
+}
+
+fn is_srgb_format(format: vk::Format) -> bool {
+    matches!(
+        format,
+        vk::Format::B8G8R8A8_SRGB
+            | vk::Format::R8G8B8A8_SRGB
+            | vk::Format::A8B8G8R8_SRGB_PACK32
+    )
+}
+
+fn srgb_to_linear(c: f32) -> f32 {
+    if c <= 0.04045 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+fn dim_rgba(packed: u32) -> u32 {
+    let r = (((packed >> 24) & 0xFF) * 2) / 3;
+    let g = (((packed >> 16) & 0xFF) * 2) / 3;
+    let b = (((packed >> 8) & 0xFF) * 2) / 3;
+    let a = packed & 0xFF;
+    (r << 24) | (g << 16) | (b << 8) | a
 }

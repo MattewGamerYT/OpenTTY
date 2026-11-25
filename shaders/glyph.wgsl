@@ -1,5 +1,7 @@
 struct PushConstants {
     viewport_size: vec2<f32>,
+    is_srgb: u32,
+    _pad: u32,
 }
 
 var<push_constant> pc: PushConstants;
@@ -32,11 +34,23 @@ struct VertexOutput {
     @location(7) @interpolate(flat) flags: u32,
 }
 
+fn srgb_to_linear(c: f32) -> f32 {
+    if c <= 0.04045 {
+        return c / 12.92;
+    }
+    return pow((c + 0.055) / 1.055, 2.4);
+}
+
 fn unpack_rgba(packed: u32) -> vec4<f32> {
-    let r = f32((packed >> 24u) & 0xFFu) / 255.0;
-    let g = f32((packed >> 16u) & 0xFFu) / 255.0;
-    let b = f32((packed >> 8u) & 0xFFu) / 255.0;
+    var r = f32((packed >> 24u) & 0xFFu) / 255.0;
+    var g = f32((packed >> 16u) & 0xFFu) / 255.0;
+    var b = f32((packed >> 8u) & 0xFFu) / 255.0;
     let a = f32(packed & 0xFFu) / 255.0;
+    if pc.is_srgb != 0u {
+        r = srgb_to_linear(r);
+        g = srgb_to_linear(g);
+        b = srgb_to_linear(b);
+    }
     return vec4<f32>(r, g, b, a);
 }
 

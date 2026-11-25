@@ -22,6 +22,8 @@ pub struct CellInstance {
 #[derive(Debug, Clone, Copy)]
 pub struct PushConstants {
     pub viewport_size: [f32; 2],
+    pub is_srgb: u32,
+    pub _pad: u32,
 }
 
 pub const FLAG_UNDERLINE: u32 = 1 << 0;

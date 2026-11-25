@@ -42,10 +42,10 @@ impl Default for Config {
             initial_rows: 32,
             padding_px: 10.0,
             scrollback_lines: 10_000,
-            // Breeze / Kanagawa-inspired crisp dark palette (RGBA8)
-            default_fg: 0xDCD7_BAFF,
-            default_bg: 0x1616_1DFF,
-            cursor_color: 0x7E9C_D8FF,
+            // Crisp dark obsidian terminal theme (RGBA8)
+            default_fg: 0xE2E8_F0FF,
+            default_bg: 0x0F11_1AFF,
+            cursor_color: 0x60A5_FAFF,
         }
     }
 }

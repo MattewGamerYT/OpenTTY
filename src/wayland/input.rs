@@ -1,5 +1,4 @@
-use std::io::Read;
-use std::os::fd::OwnedFd;
+use std::os::fd::{AsRawFd, OwnedFd};
 use std::time::Instant;
 
 use xkbcommon::xkb::{self, Keycode, Keysym, State};
@@ -37,32 +36,60 @@ pub struct XkbInput {
 
 impl XkbInput {
     pub fn new() -> Self {
+        let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
+        let fallback_state = xkb::Keymap::new_from_names(
+            &context,
+            "",
+            "",
+            "",
+            "",
+            None,
+            xkb::KEYMAP_COMPILE_NO_FLAGS,
+        )
+        .map(|km| State::new(&km));
+
         Self {
-            context: xkb::Context::new(xkb::CONTEXT_NO_FLAGS),
-            state: None,
+            context,
+            state: fallback_state,
             repeat: RepeatState::default(),
         }
     }
 
     pub fn load_keymap_from_fd(&mut self, fd: OwnedFd, size: u32) {
-        let mut file = std::fs::File::from(fd);
-        let mut buf = vec![0u8; size as usize];
-        if file.read_exact(&mut buf).is_err() {
+        if size == 0 {
             return;
         }
-        while buf.last() == Some(&0) {
-            buf.pop();
-        }
-        let Ok(keymap_str) = std::str::from_utf8(&buf) else {
-            return;
+        let ptr = unsafe {
+            nix::libc::mmap(
+                std::ptr::null_mut(),
+                size as usize,
+                nix::libc::PROT_READ,
+                nix::libc::MAP_PRIVATE,
+                fd.as_raw_fd(),
+                0,
+            )
         };
+        if ptr == nix::libc::MAP_FAILED {
+            log::warn!("mmap failed for Wayland keymap fd");
+            return;
+        }
+
+        let slice = unsafe { std::slice::from_raw_parts(ptr as *const u8, size as usize) };
+        let end = slice.iter().position(|&b| b == 0).unwrap_or(slice.len());
+        let keymap_str = String::from_utf8_lossy(&slice[..end]).into_owned();
+        unsafe {
+            nix::libc::munmap(ptr, size as usize);
+        }
+
         if let Some(keymap) = xkb::Keymap::new_from_string(
             &self.context,
-            keymap_str.to_string(),
+            keymap_str,
             xkb::KEYMAP_FORMAT_TEXT_V1,
             xkb::KEYMAP_COMPILE_NO_FLAGS,
         ) {
             self.state = Some(State::new(&keymap));
+        } else {
+            log::warn!("failed to compile XKB keymap from Wayland compositor");
         }
     }
 
