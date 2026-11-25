@@ -87,10 +87,6 @@ impl FontEngine {
         self.metrics
     }
 
-    pub fn px_size(&self) -> f32 {
-        self.px_size
-    }
-
     pub fn rasterize(&mut self, key: GlyphKey) -> &RasterizedGlyph {
         if !self.cache.contains_key(&key) {
             let font = self.select_font(key);

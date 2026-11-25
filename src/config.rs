@@ -42,10 +42,10 @@ impl Default for Config {
             initial_rows: 32,
             padding_px: 10.0,
             scrollback_lines: 10_000,
-            // Crisp dark obsidian terminal theme (RGBA8)
-            default_fg: 0xE2E8_F0FF,
-            default_bg: 0x0F11_1AFF,
-            cursor_color: 0x60A5_FAFF,
+            // KDE Konsole Breeze palette (RGBA8)
+            default_fg: 0xFCFC_FCFF,
+            default_bg: 0x2326_29FF,
+            cursor_color: 0xEFF0_F1FF,
         }
     }
 }

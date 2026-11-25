@@ -6,24 +6,24 @@ pub enum Color {
     Rgb(u8, u8, u8),
 }
 
-// High-contrast dark-mode 16-color ANSI palette tuned for Fish & TUI legibility (RGBA8)
+// KDE Konsole Breeze 16-color ANSI palette (RGBA8)
 const ANSI_16: [u32; 16] = [
-    0x1E22_2DFF, // 0 Black
-    0xF871_71FF, // 1 Red
-    0x4ADE_80FF, // 2 Green
-    0xFACC_15FF, // 3 Yellow
-    0x60A5_FAFF, // 4 Blue
-    0xC084_FCFF, // 5 Magenta
-    0x22D3_EEFF, // 6 Cyan
-    0xCBD5_E1FF, // 7 White
-    0x6474_8BFF, // 8 Bright Black (Fish autosuggestions)
-    0xFCA5_A5FF, // 9 Bright Red
-    0x86EF_ACFF, // 10 Bright Green
-    0xFDE0_47FF, // 11 Bright Yellow
-    0x93C5_FDFF, // 12 Bright Blue
-    0xD8B4_FEFF, // 13 Bright Magenta
-    0x67E8_F9FF, // 14 Bright Cyan
-    0xF8FA_FCFF, // 15 Bright White
+    0x2326_29FF, // 0 Black
+    0xED15_15FF, // 1 Red
+    0x11D1_16FF, // 2 Green
+    0xF674_00FF, // 3 Yellow
+    0x1D99_F3FF, // 4 Blue
+    0x9B59_B6FF, // 5 Magenta
+    0x1ABC_9CFF, // 6 Cyan
+    0xFCFC_FCFF, // 7 White
+    0x7F8C_8DFF, // 8 Bright Black
+    0xC039_2BFF, // 9 Bright Red
+    0x1CDC_9AFF, // 10 Bright Green
+    0xFDBC_4BFF, // 11 Bright Yellow
+    0x3DAE_E9FF, // 12 Bright Blue
+    0x8E44_ADFF, // 13 Bright Magenta
+    0x16A0_85FF, // 14 Bright Cyan
+    0xFFFF_FFFF, // 15 Bright White
 ];
 
 pub fn resolve_rgba(color: Color, default_fg: u32, default_bg: u32) -> u32 {

@@ -5,6 +5,7 @@ pub struct SwapchainState {
     pub swapchain: vk::SwapchainKHR,
     pub format: vk::Format,
     pub extent: vk::Extent2D,
+    #[allow(dead_code)]
     pub images: Vec<vk::Image>,
     pub views: Vec<vk::ImageView>,
     pub framebuffers: Vec<vk::Framebuffer>,

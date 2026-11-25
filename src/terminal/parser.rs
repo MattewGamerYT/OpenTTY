@@ -158,6 +158,12 @@ impl Perform for Terminal {
             return;
         }
 
+        // Do not let prefixed CSI sequences (e.g. Fish's `CSI > 4;2 m` modifyOtherKeys
+        // or Kitty keyboard `CSI = 5 u` / `CSI < u`) fall through into SGR or cursor restore.
+        if !intermediates.is_empty() {
+            return;
+        }
+
         match action {
             'A' => {
                 let n = p(0, 1);
@@ -447,10 +453,14 @@ impl Terminal {
                 1 => grid.active_flags.bold = true,
                 2 => grid.active_flags.dim = true,
                 3 => grid.active_flags.italic = true,
-                4 => grid.active_flags.underline = true,
+                4 => {
+                    let sub_kind = sub.get(1).copied().unwrap_or(1);
+                    grid.active_flags.underline = sub_kind != 0;
+                }
                 7 => grid.active_flags.inverse = true,
                 8 => grid.active_flags.hidden = true,
                 9 => grid.active_flags.strikethrough = true,
+                21 => grid.active_flags.underline = true,
                 22 => {
                     grid.active_flags.bold = false;
                     grid.active_flags.dim = false;
@@ -466,8 +476,7 @@ impl Terminal {
                 49 => grid.active_bg = Color::DefaultBg,
                 90..=97 => grid.active_fg = Color::Indexed((code - 90 + 8) as u8),
                 100..=107 => grid.active_bg = Color::Indexed((code - 100 + 8) as u8),
-                38 | 48 => {
-                    let is_fg = code == 38;
+                38 | 48 | 58 => {
                     let parsed = if sub.len() >= 2 {
                         // Colon-delimited form: 38:5:N or 38:2:CS:R:G:B or 38:2:R:G:B
                         match sub[1] {
@@ -500,13 +509,15 @@ impl Terminal {
                     };
 
                     if let Some(c) = parsed {
-                        if is_fg {
+                        if code == 38 {
                             grid.active_fg = c;
-                        } else {
+                        } else if code == 48 {
                             grid.active_bg = c;
                         }
+                        // code == 58 (underline color) is consumed cleanly without corrupting flags
                     }
                 }
+                59 => {}
                 _ => {}
             }
         }

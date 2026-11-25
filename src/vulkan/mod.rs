@@ -460,7 +460,15 @@ impl VulkanRenderer {
                 let cell = row.cells[col_idx];
                 let cell_x = pad + (col_idx as f32) * cw;
 
-                let mut fg = resolve_rgba(cell.fg, config.default_fg, config.default_bg);
+                let fg_color = match cell.fg {
+                    crate::terminal::color::Color::Indexed(idx)
+                        if cell.flags.bold && idx < 8 =>
+                    {
+                        crate::terminal::color::Color::Indexed(idx + 8)
+                    }
+                    other => other,
+                };
+                let mut fg = resolve_rgba(fg_color, config.default_fg, config.default_bg);
                 let mut bg = resolve_rgba(cell.bg, config.default_fg, config.default_bg);
                 if cell.flags.inverse {
                     std::mem::swap(&mut fg, &mut bg);
