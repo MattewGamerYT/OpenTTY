@@ -215,6 +215,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         phys_h.min(u16::MAX as u32) as u16,
                     ) {
                         log::warn!("PTY resize failed: {err}");
+                    } else {
+                        log::info!("PTY resized to {cols}x{rows} ({phys_w}x{phys_h} px)");
                     }
                 } else {
                     terminal.term.set_pixel_size(

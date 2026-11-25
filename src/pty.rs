@@ -7,6 +7,9 @@ use std::process::{Child, Command, Stdio};
 use nix::fcntl::{FcntlArg, OFlag, fcntl};
 use nix::libc;
 use nix::pty::{Winsize, openpty};
+use nix::sys::termios::{InputFlags, SetArg, tcgetattr, tcsetattr};
+
+nix::ioctl_write_ptr_bad!(tiocswinsz, libc::TIOCSWINSZ, Winsize);
 
 pub struct Pty {
     master: File,
@@ -26,6 +29,11 @@ impl Pty {
         let master_fd: OwnedFd = pty.master;
         let slave_fd: OwnedFd = pty.slave;
 
+        if let Ok(mut tio) = tcgetattr(&slave_fd) {
+            tio.input_flags |= InputFlags::IUTF8;
+            let _ = tcsetattr(&slave_fd, SetArg::TCSANOW, &tio);
+        }
+
         // Set FD_CLOEXEC + O_NONBLOCK on master PTY so child processes never inherit master_fd
         // and the event loop never stalls.
         let master_flags = fcntl(master_fd.as_raw_fd(), FcntlArg::F_GETFL).map_err(io::Error::other)?;
@@ -36,7 +44,10 @@ impl Pty {
             fcntl(master_fd.as_raw_fd(), FcntlArg::F_GETFD).map_err(io::Error::other)?;
         fcntl(
             master_fd.as_raw_fd(),
-            FcntlArg::F_SETFD(nix::fcntl::FdFlag::from_bits_truncate(master_fd_flags) | nix::fcntl::FdFlag::FD_CLOEXEC),
+            FcntlArg::F_SETFD(
+                nix::fcntl::FdFlag::from_bits_truncate(master_fd_flags)
+                    | nix::fcntl::FdFlag::FD_CLOEXEC,
+            ),
         )
         .map_err(io::Error::other)?;
 
@@ -44,7 +55,10 @@ impl Pty {
             fcntl(slave_fd.as_raw_fd(), FcntlArg::F_GETFD).map_err(io::Error::other)?;
         fcntl(
             slave_fd.as_raw_fd(),
-            FcntlArg::F_SETFD(nix::fcntl::FdFlag::from_bits_truncate(slave_fd_flags) | nix::fcntl::FdFlag::FD_CLOEXEC),
+            FcntlArg::F_SETFD(
+                nix::fcntl::FdFlag::from_bits_truncate(slave_fd_flags)
+                    | nix::fcntl::FdFlag::FD_CLOEXEC,
+            ),
         )
         .map_err(io::Error::other)?;
 
@@ -56,6 +70,9 @@ impl Pty {
         cmd.stdin(Stdio::from(slave_stdin))
             .stdout(Stdio::from(slave_stdout))
             .stderr(Stdio::from(slave_stderr))
+            .env_remove("LINES")
+            .env_remove("COLUMNS")
+            .env_remove("TERMCAP")
             .env("TERM", "xterm-256color")
             .env("COLORTERM", "truecolor")
             .env("TERM_PROGRAM", "OpenTTY")
@@ -74,7 +91,10 @@ impl Pty {
                     return Err(io::Error::last_os_error());
                 }
 
-                // Restore default signal dispositions.
+                // Restore default signal dispositions via sigaction.
+                let mut sa: libc::sigaction = std::mem::zeroed();
+                sa.sa_sigaction = libc::SIG_DFL;
+                sa.sa_mask = empty_set;
                 for sig in [
                     libc::SIGHUP,
                     libc::SIGINT,
@@ -89,14 +109,16 @@ impl Pty {
                     libc::SIGTTOU,
                     libc::SIGWINCH,
                 ] {
-                    libc::signal(sig, libc::SIG_DFL);
+                    libc::sigaction(sig, &sa, std::ptr::null_mut());
                 }
 
                 let pid = libc::setsid();
                 if pid == -1 {
                     return Err(io::Error::last_os_error());
                 }
-                if libc::ioctl(libc::STDIN_FILENO, libc::TIOCSCTTY as libc::Ioctl, 0) == -1 {
+                if libc::ioctl(libc::STDIN_FILENO, libc::TIOCSCTTY as libc::Ioctl, 0 as libc::c_int)
+                    == -1
+                {
                     return Err(io::Error::last_os_error());
                 }
                 if libc::tcsetpgrp(libc::STDIN_FILENO, pid) == -1 {
@@ -125,18 +147,9 @@ impl Pty {
         };
 
         // Kernel updates tty->winsize and delivers SIGWINCH to the foreground process group.
-        let res = unsafe {
-            libc::ioctl(
-                self.master.as_raw_fd(),
-                libc::TIOCSWINSZ as libc::Ioctl,
-                &ws as *const Winsize,
-            )
-        };
-        if res == -1 {
-            Err(io::Error::last_os_error())
-        } else {
-            Ok(())
-        }
+        unsafe { tiocswinsz(self.master.as_raw_fd(), &ws) }
+            .map(|_| ())
+            .map_err(io::Error::other)
     }
 
     pub fn read_nonblocking(&mut self, buf: &mut [u8]) -> io::Result<usize> {
