@@ -26,12 +26,28 @@ impl Pty {
         let master_fd: OwnedFd = pty.master;
         let slave_fd: OwnedFd = pty.slave;
 
-        // Set non-blocking mode on master PTY so the event loop never stalls.
-        let flags = fcntl(master_fd.as_raw_fd(), FcntlArg::F_GETFL).map_err(io::Error::other)?;
-        let nonblock = OFlag::from_bits_truncate(flags) | OFlag::O_NONBLOCK;
+        // Set FD_CLOEXEC + O_NONBLOCK on master PTY so child processes never inherit master_fd
+        // and the event loop never stalls.
+        let master_flags = fcntl(master_fd.as_raw_fd(), FcntlArg::F_GETFL).map_err(io::Error::other)?;
+        let nonblock = OFlag::from_bits_truncate(master_flags) | OFlag::O_NONBLOCK;
         fcntl(master_fd.as_raw_fd(), FcntlArg::F_SETFL(nonblock)).map_err(io::Error::other)?;
 
-        let slave_raw = slave_fd.as_raw_fd();
+        let master_fd_flags =
+            fcntl(master_fd.as_raw_fd(), FcntlArg::F_GETFD).map_err(io::Error::other)?;
+        fcntl(
+            master_fd.as_raw_fd(),
+            FcntlArg::F_SETFD(nix::fcntl::FdFlag::from_bits_truncate(master_fd_flags) | nix::fcntl::FdFlag::FD_CLOEXEC),
+        )
+        .map_err(io::Error::other)?;
+
+        let slave_fd_flags =
+            fcntl(slave_fd.as_raw_fd(), FcntlArg::F_GETFD).map_err(io::Error::other)?;
+        fcntl(
+            slave_fd.as_raw_fd(),
+            FcntlArg::F_SETFD(nix::fcntl::FdFlag::from_bits_truncate(slave_fd_flags) | nix::fcntl::FdFlag::FD_CLOEXEC),
+        )
+        .map_err(io::Error::other)?;
+
         let slave_stdin = slave_fd.try_clone()?;
         let slave_stdout = slave_fd.try_clone()?;
         let slave_stderr = slave_fd;
@@ -47,11 +63,43 @@ impl Pty {
 
         // Safety: runs in the forked child immediately prior to execvp.
         unsafe {
-            cmd.pre_exec(move || {
-                if libc::setsid() == -1 {
+            cmd.pre_exec(|| {
+                // Unblock all signals (especially SIGWINCH) so child shells and TUI apps
+                // never inherit a masked signal set from the GUI/Wayland process.
+                let mut empty_set: libc::sigset_t = std::mem::zeroed();
+                if libc::sigemptyset(&mut empty_set) == -1 {
                     return Err(io::Error::last_os_error());
                 }
-                if libc::ioctl(slave_raw, libc::TIOCSCTTY as libc::c_ulong, 0) == -1 {
+                if libc::sigprocmask(libc::SIG_SETMASK, &empty_set, std::ptr::null_mut()) == -1 {
+                    return Err(io::Error::last_os_error());
+                }
+
+                // Restore default signal dispositions.
+                for sig in [
+                    libc::SIGHUP,
+                    libc::SIGINT,
+                    libc::SIGQUIT,
+                    libc::SIGPIPE,
+                    libc::SIGALRM,
+                    libc::SIGTERM,
+                    libc::SIGCHLD,
+                    libc::SIGCONT,
+                    libc::SIGTSTP,
+                    libc::SIGTTIN,
+                    libc::SIGTTOU,
+                    libc::SIGWINCH,
+                ] {
+                    libc::signal(sig, libc::SIG_DFL);
+                }
+
+                let pid = libc::setsid();
+                if pid == -1 {
+                    return Err(io::Error::last_os_error());
+                }
+                if libc::ioctl(libc::STDIN_FILENO, libc::TIOCSCTTY as libc::Ioctl, 0) == -1 {
+                    return Err(io::Error::last_os_error());
+                }
+                if libc::tcsetpgrp(libc::STDIN_FILENO, pid) == -1 {
                     return Err(io::Error::last_os_error());
                 }
                 Ok(())
@@ -76,12 +124,12 @@ impl Pty {
             ws_ypixel: pixel_h,
         };
 
-        // Kernel delivers SIGWINCH to the foreground process group automatically.
+        // Kernel updates tty->winsize and delivers SIGWINCH to the foreground process group.
         let res = unsafe {
             libc::ioctl(
                 self.master.as_raw_fd(),
-                libc::TIOCSWINSZ as libc::c_ulong,
-                &ws,
+                libc::TIOCSWINSZ as libc::Ioctl,
+                &ws as *const Winsize,
             )
         };
         if res == -1 {

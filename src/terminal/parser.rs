@@ -2,10 +2,11 @@ use vte::{Params, Perform};
 
 use super::Terminal;
 use super::color::Color;
-use super::grid::{Cell, CellFlags, CursorStyle, SavedCursor};
+use super::grid::{Cell, CellFlags, CursorStyle};
 
 impl Perform for Terminal {
     fn print(&mut self, ch: char) {
+        self.last_printed_char = Some(ch);
         self.active_grid_mut().put_char(ch);
         self.dirty = true;
     }
@@ -141,7 +142,20 @@ impl Perform for Terminal {
                     }
                     self.dirty = true;
                 }
+                'n' if p_raw(0, 0) == 6 => {
+                    let grid = self.active_grid();
+                    let reply = format!("\x1b[?{};{}R", grid.cursor.row + 1, grid.cursor.col + 1);
+                    self.pty_replies.extend_from_slice(reply.as_bytes());
+                }
                 _ => {}
+            }
+            return;
+        }
+
+        if intermediates == [b'>'] {
+            if action == 'c' && p_raw(0, 0) == 0 {
+                // VT220 secondary device attributes
+                self.pty_replies.extend_from_slice(b"\x1b[>0;10;1c");
             }
             return;
         }
@@ -359,6 +373,26 @@ impl Perform for Terminal {
                 let count = p(0, 1);
                 self.active_grid_mut().scroll_down_in_region(count);
             }
+            'b' => {
+                if let Some(ch) = self.last_printed_char {
+                    let grid = self.active_grid_mut();
+                    let count = p(0, 1).min(grid.cols.saturating_mul(grid.rows));
+                    for _ in 0..count {
+                        grid.put_char(ch);
+                    }
+                }
+            }
+            't' => match p_raw(0, 0) {
+                14 => {
+                    let reply = format!("\x1b[4;{};{}t", self.pixel_height, self.pixel_width);
+                    self.pty_replies.extend_from_slice(reply.as_bytes());
+                }
+                18 => {
+                    let reply = format!("\x1b[8;{};{}t", self.rows(), self.cols());
+                    self.pty_replies.extend_from_slice(reply.as_bytes());
+                }
+                _ => {}
+            },
             'r' => {
                 let top = p(0, 1).saturating_sub(1);
                 let grid = self.active_grid_mut();
@@ -375,25 +409,10 @@ impl Perform for Terminal {
                 grid.cursor.wrap_pending = false;
             }
             's' => {
-                let grid = self.active_grid_mut();
-                grid.saved_cursor = Some(SavedCursor {
-                    col: grid.cursor.col,
-                    row: grid.cursor.row,
-                    fg: grid.active_fg,
-                    bg: grid.active_bg,
-                    flags: grid.active_flags,
-                });
+                self.save_cursor();
             }
             'u' => {
-                let grid = self.active_grid_mut();
-                if let Some(saved) = grid.saved_cursor {
-                    grid.cursor.col = saved.col.min(grid.cols - 1);
-                    grid.cursor.row = saved.row.min(grid.rows - 1);
-                    grid.cursor.wrap_pending = false;
-                    grid.active_fg = saved.fg;
-                    grid.active_bg = saved.bg;
-                    grid.active_flags = saved.flags;
-                }
+                self.restore_cursor();
             }
             'c' => {
                 if intermediates.is_empty() && p_raw(0, 0) == 0 {
@@ -428,6 +447,13 @@ impl Terminal {
             1 => self.application_cursor_keys = enable,
             25 => self.active_grid_mut().cursor.visible = enable,
             47 | 1047 => self.set_alt_screen(enable, false),
+            1048 => {
+                if enable {
+                    self.save_cursor();
+                } else {
+                    self.restore_cursor();
+                }
+            }
             1049 => self.set_alt_screen(enable, true),
             2004 => self.bracketed_paste = enable,
             _ => {}

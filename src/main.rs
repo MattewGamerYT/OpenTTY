@@ -79,6 +79,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
 
     let mut terminal = TerminalState::new(cols as usize, rows as usize, config.scrollback_lines);
+    terminal.term.set_pixel_size(
+        phys_w.min(u16::MAX as u32) as u16,
+        phys_h.min(u16::MAX as u32) as u16,
+    );
     let mut pty_buf = vec![0u8; 64 * 1024];
 
     // Clear initial flags so first frame renders immediately.
@@ -200,9 +204,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     cols = new_cols;
                     rows = new_rows;
                     terminal.term.resize(cols as usize, rows as usize);
-                    let _ = pty.resize(
+                    terminal.term.set_pixel_size(
+                        phys_w.min(u16::MAX as u32) as u16,
+                        phys_h.min(u16::MAX as u32) as u16,
+                    );
+                    if let Err(err) = pty.resize(
                         cols,
                         rows,
+                        phys_w.min(u16::MAX as u32) as u16,
+                        phys_h.min(u16::MAX as u32) as u16,
+                    ) {
+                        log::warn!("PTY resize failed: {err}");
+                    }
+                } else {
+                    terminal.term.set_pixel_size(
                         phys_w.min(u16::MAX as u32) as u16,
                         phys_h.min(u16::MAX as u32) as u16,
                     );
@@ -216,9 +231,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let dirty = wayland.state.needs_redraw || terminal.term.dirty;
         if dirty && !wayland.state.frame_pending {
             let current_scale = wayland.state.scale_factor();
-            wayland.prepare_frame_commit();
-            let suboptimal =
-                renderer.render_and_present(&terminal.term, &mut font, &config, current_scale)?;
+            let suboptimal = renderer.render_and_present(
+                &terminal.term,
+                &mut font,
+                &config,
+                current_scale,
+                || wayland.prepare_frame_commit(),
+            )?;
 
             if suboptimal {
                 let (pw, ph) = wayland.state.physical_size();

@@ -231,6 +231,7 @@ impl VulkanRenderer {
         font: &mut FontEngine,
         config: &Config,
         scale_factor: f32,
+        mut on_before_present: impl FnMut(),
     ) -> Result<bool, String> {
         let frame_idx = self.current_frame;
         let in_flight = self.frames[frame_idx].in_flight;
@@ -415,6 +416,8 @@ impl VulkanRenderer {
             .wait_semaphores(std::slice::from_ref(&render_finished))
             .swapchains(&swapchains)
             .image_indices(&indices);
+
+        on_before_present();
 
         let present_res = unsafe {
             self.swapchain
