@@ -22,8 +22,13 @@ Optional `key = value` overrides (also respects `$XDG_CONFIG_HOME/opentty/opentt
 
 ```ini
 font_family = JetBrains Mono
-font_size_pt = 11.5
-padding_px = 10
+font_size_pt = 10.0
+auto_zoom = true
+auto_zoom_min_pt = 7.5
+auto_zoom_max_pt = 10.5
+auto_zoom_target_cols = 110
+auto_zoom_target_rows = 32
+padding_px = 8
 scrollback_lines = 10000
 scroll_lines_per_step = 3
 cursor_style = block        # block | beam | underline

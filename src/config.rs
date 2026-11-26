@@ -10,6 +10,11 @@ pub struct Config {
     pub shell: String,
     pub font_family_preferences: Vec<String>,
     pub font_size_pt: f32,
+    pub auto_zoom: bool,
+    pub auto_zoom_min_pt: f32,
+    pub auto_zoom_max_pt: f32,
+    pub auto_zoom_target_cols: u16,
+    pub auto_zoom_target_rows: u16,
     pub padding_px: f32,
     pub initial_cols: u16,
     pub initial_rows: u16,
@@ -52,8 +57,13 @@ impl Default for Config {
                 "Noto Sans Mono".to_string(),
                 "Liberation Mono".to_string(),
             ],
-            font_size_pt: 11.5,
-            padding_px: 10.0,
+            font_size_pt: 10.0,
+            auto_zoom: true,
+            auto_zoom_min_pt: 7.5,
+            auto_zoom_max_pt: 10.5,
+            auto_zoom_target_cols: 110,
+            auto_zoom_target_rows: 32,
+            padding_px: 8.0,
             initial_cols: 110,
             initial_rows: 32,
             scrollback_lines: 10_000,
@@ -110,6 +120,31 @@ impl Config {
                 "font_size_pt" => {
                     if let Ok(v) = val.parse::<f32>() {
                         cfg.font_size_pt = v.clamp(6.0, 48.0);
+                    }
+                }
+                "auto_zoom" => {
+                    if let Some(b) = parse_bool(val) {
+                        cfg.auto_zoom = b;
+                    }
+                }
+                "auto_zoom_min_pt" => {
+                    if let Ok(v) = val.parse::<f32>() {
+                        cfg.auto_zoom_min_pt = v.clamp(6.0, 24.0);
+                    }
+                }
+                "auto_zoom_max_pt" => {
+                    if let Ok(v) = val.parse::<f32>() {
+                        cfg.auto_zoom_max_pt = v.clamp(6.0, 48.0);
+                    }
+                }
+                "auto_zoom_target_cols" => {
+                    if let Ok(v) = val.parse::<u16>() {
+                        cfg.auto_zoom_target_cols = v.clamp(40, 300);
+                    }
+                }
+                "auto_zoom_target_rows" => {
+                    if let Ok(v) = val.parse::<u16>() {
+                        cfg.auto_zoom_target_rows = v.clamp(12, 120);
                     }
                 }
                 "padding_px" => {

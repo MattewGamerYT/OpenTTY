@@ -239,10 +239,12 @@ impl Terminal {
 
     pub fn start_selection(&mut self, col: usize, row: usize) {
         let now = Instant::now();
-        let grid = self.active_grid_mut();
-        let abs_row = grid.abs_row_for_visible(row.min(grid.rows.saturating_sub(1)));
-        let col = col.min(grid.cols.saturating_sub(1));
-        let pt = SelectionPoint { abs_row, col };
+        let (abs_row, col, pt) = {
+            let grid = self.active_grid();
+            let abs_row = grid.abs_row_for_visible(row.min(grid.rows.saturating_sub(1)));
+            let col = col.min(grid.cols.saturating_sub(1));
+            (abs_row, col, SelectionPoint { abs_row, col })
+        };
 
         let multi_click = self
             .last_click_at
@@ -263,6 +265,7 @@ impl Terminal {
             _ => SelectionMode::Char,
         };
 
+        let grid = self.active_grid_mut();
         let sel = match mode {
             SelectionMode::Char => Selection {
                 anchor: pt,

@@ -131,14 +131,18 @@ fn compute_cell_metrics(font: &Font, px_size: f32) -> CellMetrics {
     let (m_metrics, _) = font.rasterize('M', px_size);
     let line_metrics = font.horizontal_line_metrics(px_size);
 
-    let cell_width = m_metrics.advance_width.max(px_size * 0.5).ceil();
+    let cell_width = m_metrics.advance_width.max(px_size * 0.48).round().max(1.0);
     let (ascent, descent, line_gap) = match line_metrics {
         Some(lm) => (lm.ascent, lm.descent, lm.line_gap),
         None => (px_size * 0.8, -px_size * 0.2, 0.0),
     };
-    let raw_height = (ascent - descent + line_gap).max(px_size * 1.15);
-    let cell_height = raw_height.ceil();
-    let baseline = ascent.ceil();
+    let baseline = ascent.round().max(1.0);
+    let min_span = baseline + (-descent).round();
+    let cell_height = (ascent - descent + line_gap * 0.25)
+        .round()
+        .max(min_span)
+        .max((px_size * 1.1).round())
+        .max(1.0);
 
     CellMetrics {
         cell_width,

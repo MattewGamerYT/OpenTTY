@@ -513,10 +513,10 @@ impl Dispatch<wl_data_device::WlDataDevice, ()> for WaylandState {
                         .and_then(|mimes| clipboard::pick_dnd_mime(mimes));
                     offer.accept(serial, picked);
                     if offer.version() >= 3 {
-                        offer.set_actions(
-                            wl_data_device_manager::DndAction::Copy,
-                            wl_data_device_manager::DndAction::Copy,
-                        );
+                        let supported = wl_data_device_manager::DndAction::Copy
+                            | wl_data_device_manager::DndAction::Move
+                            | wl_data_device_manager::DndAction::Ask;
+                        offer.set_actions(supported, wl_data_device_manager::DndAction::Copy);
                     }
                     state.dnd_offer = Some(offer);
                 }
@@ -559,6 +559,10 @@ impl Dispatch<wl_data_device::WlDataDevice, ()> for WaylandState {
             _ => {}
         }
     }
+
+    wayland_client::event_created_child!(WaylandState, wl_data_device::WlDataDevice, [
+        wl_data_device::EVT_DATA_OFFER_OPCODE => (wl_data_offer::WlDataOffer, ()),
+    ]);
 }
 
 impl Dispatch<wl_data_offer::WlDataOffer, ()> for WaylandState {
@@ -570,12 +574,43 @@ impl Dispatch<wl_data_offer::WlDataOffer, ()> for WaylandState {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
-        if let wl_data_offer::Event::Offer { mime_type } = event {
-            state
-                .offer_mimes
-                .entry(offer.id())
-                .or_default()
-                .push(mime_type);
+        match event {
+            wl_data_offer::Event::Offer { mime_type } => {
+                state
+                    .offer_mimes
+                    .entry(offer.id())
+                    .or_default()
+                    .push(mime_type);
+            }
+            wl_data_offer::Event::SourceActions {
+                source_actions: WEnum::Value(source_actions),
+            } => {
+                if offer.version() >= 3
+                    && state
+                        .dnd_offer
+                        .as_ref()
+                        .is_some_and(|cur| cur.id() == offer.id())
+                {
+                    let supported = wl_data_device_manager::DndAction::Copy
+                        | wl_data_device_manager::DndAction::Move
+                        | wl_data_device_manager::DndAction::Ask;
+                    let acceptable = source_actions & supported;
+                    let chosen = if acceptable.is_empty() {
+                        wl_data_device_manager::DndAction::Copy
+                    } else {
+                        acceptable
+                    };
+                    let preferred = if chosen.contains(wl_data_device_manager::DndAction::Copy) {
+                        wl_data_device_manager::DndAction::Copy
+                    } else if chosen.contains(wl_data_device_manager::DndAction::Move) {
+                        wl_data_device_manager::DndAction::Move
+                    } else {
+                        wl_data_device_manager::DndAction::Ask
+                    };
+                    offer.set_actions(chosen, preferred);
+                }
+            }
+            _ => {}
         }
     }
 }

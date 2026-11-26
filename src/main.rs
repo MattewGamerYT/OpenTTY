@@ -72,6 +72,34 @@ fn encode_mouse_event(button_code: u8, col: usize, row: usize, pressed: bool, sg
     }
 }
 
+fn compute_auto_font_size_pt(
+    physical_w: u32,
+    physical_h: u32,
+    scale_factor: f32,
+    base_width_per_pt: f32,
+    base_height_per_pt: f32,
+    config: &Config,
+) -> f32 {
+    let min_pt = config.auto_zoom_min_pt.min(config.auto_zoom_max_pt);
+    let max_pt = config.font_size_pt.min(config.auto_zoom_max_pt).max(min_pt);
+    if !config.auto_zoom {
+        return config.font_size_pt;
+    }
+
+    let pad = (config.padding_px * scale_factor).round() * 2.0;
+    let avail_w = (physical_w as f32 - pad).max(1.0);
+    let avail_h = (physical_h as f32 - pad).max(1.0);
+
+    let width_per_pt = (base_width_per_pt * scale_factor).max(0.1);
+    let height_per_pt = (base_height_per_pt * scale_factor).max(0.1);
+
+    let pt_for_cols = avail_w / (width_per_pt * config.auto_zoom_target_cols.max(1) as f32);
+    let pt_for_rows = avail_h / (height_per_pt * config.auto_zoom_target_rows.max(1) as f32);
+
+    let raw_pt = max_pt.min(pt_for_cols).min(pt_for_rows).clamp(min_pt, max_pt);
+    ((raw_pt * 2.0).floor() / 2.0).clamp(min_pt, max_pt)
+}
+
 fn min_timeout(a: Option<u64>, b: Option<u64>) -> Option<u64> {
     match (a, b) {
         (Some(x), Some(y)) => Some(x.min(y)),
@@ -84,11 +112,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
 
     let config = Config::load();
-    let mut font_size_pt = config.font_size_pt;
+    let mut manual_zoom = false;
 
     // Load font at 1.0 scale first to determine clean initial logical window dimensions.
-    let mut font = FontEngine::load(&config.font_family_preferences, font_size_pt, 1.0)?;
+    let mut font = FontEngine::load(&config.font_family_preferences, config.font_size_pt, 1.0)?;
     let base_metrics = font.metrics();
+    let base_width_per_pt = base_metrics.cell_width / config.font_size_pt.max(1.0);
+    let base_height_per_pt = base_metrics.cell_height / config.font_size_pt.max(1.0);
     let initial_logical_w =
         (base_metrics.cell_width * config.initial_cols as f32 + config.padding_px * 2.0).ceil()
             as u32;
@@ -104,9 +134,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
 
     let scale_factor = wayland.state.scale_factor();
+    let (mut phys_w, mut phys_h) = wayland.state.physical_size();
+    let mut font_size_pt = compute_auto_font_size_pt(
+        phys_w,
+        phys_h,
+        scale_factor,
+        base_width_per_pt,
+        base_height_per_pt,
+        &config,
+    );
     font.set_scale(font_size_pt, scale_factor);
 
-    let (mut phys_w, mut phys_h) = wayland.state.physical_size();
     let metrics = font.metrics();
     let (mut cols, mut rows) = compute_grid_dims(
         phys_w,
@@ -485,37 +523,63 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
                 KeyAction::Zoom(delta) => {
-                    let next_pt = (font_size_pt + delta).clamp(6.0, 48.0);
-                    if (next_pt - font_size_pt).abs() > f32::EPSILON {
+                    manual_zoom = true;
+                    let next_pt = (font_size_pt + delta * 0.5).clamp(6.0, 48.0);
+                    if (next_pt - font_size_pt).abs() > 0.05 {
                         font_size_pt = next_pt;
                         pending_font_resize = true;
                     }
                 }
                 KeyAction::ResetZoom => {
-                    if (font_size_pt - config.font_size_pt).abs() > f32::EPSILON {
-                        font_size_pt = config.font_size_pt;
+                    manual_zoom = false;
+                    let target_pt = compute_auto_font_size_pt(
+                        phys_w,
+                        phys_h,
+                        wayland.state.scale_factor(),
+                        base_width_per_pt,
+                        base_height_per_pt,
+                        &config,
+                    );
+                    if (target_pt - font_size_pt).abs() > 0.05 {
+                        font_size_pt = target_pt;
                         pending_font_resize = true;
                     }
                 }
             }
         }
 
-        // Handle fractional scale, font zoom, or window dimension changes atomically.
+        // Handle fractional scale, auto-zoom, font zoom, or window dimension changes atomically.
         if wayland.state.scale_changed || wayland.state.size_changed || pending_font_resize {
             let new_scale = wayland.state.scale_factor();
-            if wayland.state.scale_changed || pending_font_resize {
-                font.set_scale(font_size_pt, new_scale);
-                renderer.clear_atlas();
-                wayland.state.scale_changed = false;
-                pending_font_resize = false;
-            }
-
             let (new_phys_w, new_phys_h) = wayland.state.physical_size();
+
             if new_phys_w != phys_w || new_phys_h != phys_h || wayland.state.size_changed {
                 phys_w = new_phys_w;
                 phys_h = new_phys_h;
                 renderer.recreate_swapchain(phys_w, phys_h)?;
                 wayland.state.size_changed = false;
+            }
+
+            if !manual_zoom && config.auto_zoom {
+                let auto_pt = compute_auto_font_size_pt(
+                    phys_w,
+                    phys_h,
+                    new_scale,
+                    base_width_per_pt,
+                    base_height_per_pt,
+                    &config,
+                );
+                if (auto_pt - font_size_pt).abs() > 0.05 {
+                    font_size_pt = auto_pt;
+                    pending_font_resize = true;
+                }
+            }
+
+            if wayland.state.scale_changed || pending_font_resize {
+                font.set_scale(font_size_pt, new_scale);
+                renderer.clear_atlas();
+                wayland.state.scale_changed = false;
+                pending_font_resize = false;
             }
 
             let m = font.metrics();
