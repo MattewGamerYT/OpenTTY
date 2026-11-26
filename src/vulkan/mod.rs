@@ -17,7 +17,7 @@ use self::pipeline::{
     CellInstance, FLAG_CURSOR_BEAM, FLAG_CURSOR_BLOCK, FLAG_CURSOR_UNDERLINE, FLAG_STRIKETHROUGH,
     FLAG_UNDERLINE, GlyphPipeline, PushConstants,
 };
-use self::swapchain::{SwapchainState, create_render_pass};
+use self::swapchain::{SwapchainState, choose_surface_format, create_render_pass};
 
 const MAX_FRAMES_IN_FLIGHT: usize = 2;
 
@@ -120,12 +120,7 @@ impl VulkanRenderer {
             surface_loader.get_physical_device_surface_formats(physical_device, surface)
         }
         .map_err(|e| format!("get_physical_device_surface_formats failed: {e}"))?;
-        let format = formats
-            .iter()
-            .find(|f| f.format == vk::Format::B8G8R8A8_UNORM)
-            .or_else(|| formats.iter().find(|f| f.format == vk::Format::R8G8B8A8_UNORM))
-            .map(|f| f.format)
-            .unwrap_or(formats[0].format);
+        let format = choose_surface_format(&formats).format;
 
         let render_pass = create_render_pass(&device, format)?;
         let swapchain = SwapchainState::create(
@@ -231,6 +226,7 @@ impl VulkanRenderer {
         font: &mut FontEngine,
         config: &Config,
         scale_factor: f32,
+        cursor_blink_visible: bool,
         mut on_before_present: impl FnMut(),
     ) -> Result<bool, String> {
         let frame_idx = self.current_frame;
@@ -260,8 +256,11 @@ impl VulkanRenderer {
             Err(e) => return Err(format!("acquire_next_image failed: {e}")),
         };
 
+        // Reset saturated glyph atlas only at frame boundary before building instances.
+        self.atlas.clear_if_saturated();
+
         // Build per-cell instances on CPU and copy to persistent mapped buffer.
-        self.build_cell_instances(terminal, font, config, scale_factor);
+        self.build_cell_instances(terminal, font, config, scale_factor, cursor_blink_visible);
         let instance_count = self.instances_scratch.len();
 
         if instance_count > self.frames[frame_idx].instance_capacity {
@@ -440,16 +439,19 @@ impl VulkanRenderer {
         font: &mut FontEngine,
         config: &Config,
         scale_factor: f32,
+        cursor_blink_visible: bool,
     ) {
         self.instances_scratch.clear();
         let grid = terminal.active_grid();
+        let base_abs_row = grid.abs_row_for_visible(0);
         let metrics = font.metrics();
         let pad = (config.padding_px * scale_factor).round();
         let cw = metrics.cell_width;
         let ch = metrics.cell_height;
         let baseline = metrics.baseline;
 
-        let cursor_visible = grid.cursor.visible && grid.scroll_offset == 0;
+        let cursor_visible =
+            grid.cursor.visible && grid.scroll_offset == 0 && cursor_blink_visible;
         let cursor_row = grid.cursor.row;
         let cursor_col = grid.cursor.col;
 
@@ -458,6 +460,7 @@ impl VulkanRenderer {
                 continue;
             };
             let cell_y = pad + (row_idx as f32) * ch;
+            let abs_row = base_abs_row + row_idx;
 
             for col_idx in 0..grid.cols.min(row.cells.len()) {
                 let cell = row.cells[col_idx];
@@ -483,6 +486,12 @@ impl VulkanRenderer {
                     fg = bg;
                 }
 
+                let is_selected = terminal.is_cell_selected(abs_row, col_idx);
+                if is_selected {
+                    fg = config.selection_fg;
+                    bg = config.selection_bg;
+                }
+
                 let mut flags = 0u32;
                 if cell.flags.underline {
                     flags |= FLAG_UNDERLINE;
@@ -500,8 +509,8 @@ impl VulkanRenderer {
                     };
                 }
 
-                // Skip completely blank default-background cells with no decorations or cursor.
-                if cell.ch == ' ' && bg == config.default_bg && flags == 0 {
+                // Skip completely blank default-background cells with no decorations, selection, or cursor.
+                if cell.ch == ' ' && bg == config.default_bg && flags == 0 && !is_selected {
                     continue;
                 }
 

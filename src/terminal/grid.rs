@@ -108,6 +108,46 @@ pub struct SavedCursor {
     pub flags: CellFlags,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct SelectionPoint {
+    pub abs_row: usize,
+    pub col: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectionMode {
+    Char,
+    Word,
+    Line,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct Selection {
+    pub anchor: SelectionPoint,
+    pub focus: SelectionPoint,
+    pub mode: SelectionMode,
+    pub active: bool,
+}
+
+impl Selection {
+    pub fn ordered(&self) -> (SelectionPoint, SelectionPoint) {
+        if self.anchor <= self.focus {
+            (self.anchor, self.focus)
+        } else {
+            (self.focus, self.anchor)
+        }
+    }
+
+    pub fn contains(&self, abs_row: usize, col: usize) -> bool {
+        if !self.active {
+            return false;
+        }
+        let (start, end) = self.ordered();
+        let pt = SelectionPoint { abs_row, col };
+        pt >= start && pt <= end
+    }
+}
+
 pub struct Grid {
     pub cols: usize,
     pub rows: usize,
@@ -122,6 +162,7 @@ pub struct Grid {
     pub active_bg: Color,
     pub active_flags: CellFlags,
     pub saved_cursor: Option<SavedCursor>,
+    pub selection: Option<Selection>,
 }
 
 impl Grid {
@@ -143,6 +184,7 @@ impl Grid {
             active_bg: Color::DefaultBg,
             active_flags: CellFlags::default(),
             saved_cursor: None,
+            selection: None,
         }
     }
 
@@ -354,6 +396,14 @@ impl Grid {
         }
         if self.scrollback.len() >= self.max_scrollback {
             self.scrollback.pop_front();
+            if let Some(ref mut sel) = self.selection {
+                if sel.anchor.abs_row == 0 && sel.focus.abs_row == 0 {
+                    self.selection = None;
+                } else {
+                    sel.anchor.abs_row = sel.anchor.abs_row.saturating_sub(1);
+                    sel.focus.abs_row = sel.focus.abs_row.saturating_sub(1);
+                }
+            }
         }
         self.scrollback.push_back(row);
     }
@@ -462,5 +512,133 @@ impl Grid {
         } else {
             self.scroll_offset = self.scroll_offset.saturating_sub((-delta_lines) as usize);
         }
+    }
+
+    pub fn abs_row_for_visible(&self, screen_row: usize) -> usize {
+        let sb_len = self.scrollback.len();
+        sb_len + screen_row - self.scroll_offset.min(sb_len)
+    }
+
+    pub fn total_rows(&self) -> usize {
+        self.scrollback.len() + self.lines.len()
+    }
+
+    pub fn row_by_abs(&self, abs_row: usize) -> Option<&Row> {
+        let sb_len = self.scrollback.len();
+        if abs_row < sb_len {
+            self.scrollback.get(abs_row)
+        } else {
+            self.lines.get(abs_row - sb_len)
+        }
+    }
+
+    pub fn word_bounds_at(&self, abs_row: usize, col: usize) -> (usize, usize) {
+        let Some(row) = self.row_by_abs(abs_row) else {
+            return (col, col);
+        };
+        if row.cells.is_empty() {
+            return (0, 0);
+        }
+        let col = col.min(row.cells.len() - 1);
+        let is_word = |ch: char| {
+            ch.is_alphanumeric()
+                || matches!(ch, '_' | '-' | '.' | '/' | '~' | ':' | '@' | '+' | '=')
+        };
+        let target_is_word = is_word(row.cells[col].ch);
+        if !target_is_word && row.cells[col].ch != ' ' {
+            return (col, col);
+        }
+
+        let matches_class = |ch: char| {
+            if target_is_word {
+                is_word(ch)
+            } else {
+                ch == ' '
+            }
+        };
+
+        let mut start = col;
+        while start > 0 && matches_class(row.cells[start - 1].ch) {
+            start -= 1;
+        }
+        let mut end = col;
+        while end + 1 < row.cells.len() && matches_class(row.cells[end + 1].ch) {
+            end += 1;
+        }
+        (start, end)
+    }
+
+    pub fn logical_line_bounds(&self, abs_row: usize) -> (usize, usize) {
+        let total = self.total_rows();
+        if total == 0 {
+            return (0, 0);
+        }
+        let mut start = abs_row.min(total - 1);
+        while start > 0 {
+            if self.row_by_abs(start - 1).is_some_and(|r| r.wrapped) {
+                start -= 1;
+            } else {
+                break;
+            }
+        }
+        let mut end = abs_row.min(total - 1);
+        while end + 1 < total && self.row_by_abs(end).is_some_and(|r| r.wrapped) {
+            end += 1;
+        }
+        (start, end)
+    }
+
+    pub fn extract_selection_text(&self, strip_trailing_spaces: bool) -> Option<String> {
+        let sel = self.selection.filter(|s| s.active)?;
+        let (start, end) = sel.ordered();
+        let mut out = String::new();
+
+        for r in start.abs_row..=end.abs_row {
+            let Some(row) = self.row_by_abs(r) else {
+                continue;
+            };
+            if row.cells.is_empty() {
+                if r < end.abs_row && !row.wrapped {
+                    out.push('\n');
+                }
+                continue;
+            }
+
+            let max_col = row.cells.len() - 1;
+            let c_start = if r == start.abs_row {
+                start.col.min(max_col)
+            } else {
+                0
+            };
+            let mut c_end = if r == end.abs_row {
+                end.col.min(max_col)
+            } else {
+                max_col
+            };
+
+            if strip_trailing_spaces && (!row.wrapped || r == end.abs_row) {
+                while c_end >= c_start && row.cells[c_end].ch == ' ' {
+                    if c_end == 0 {
+                        break;
+                    }
+                    c_end -= 1;
+                }
+                if c_end == c_start && row.cells[c_start].ch == ' ' {
+                    if r < end.abs_row && !row.wrapped {
+                        out.push('\n');
+                    }
+                    continue;
+                }
+            }
+
+            for cell in &row.cells[c_start..=c_end] {
+                out.push(cell.ch);
+            }
+            if r < end.abs_row && !row.wrapped {
+                out.push('\n');
+            }
+        }
+
+        if out.is_empty() { None } else { Some(out) }
     }
 }

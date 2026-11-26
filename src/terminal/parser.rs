@@ -61,6 +61,16 @@ impl Perform for Terminal {
                     self.pending_title = Some(title.to_string());
                 }
             }
+            b"52" if params.len() >= 3 => {
+                // OSC 52 ; <selection> ; <base64> (ignore '?' queries for clipboard safety)
+                let data = params[2];
+                if data != b"?"
+                    && let Some(decoded) = crate::wayland::clipboard::decode_base64(data)
+                {
+                    let text = String::from_utf8_lossy(&decoded).into_owned();
+                    self.pending_clipboard = Some(text);
+                }
+            }
             _ => {}
         }
     }
@@ -142,10 +152,11 @@ impl Perform for Terminal {
 
         if space && action == 'q' {
             let style = match p_raw(0, 0) {
-                0..=2 => CursorStyle::Block,
+                0 => self.default_cursor_style,
+                1..=2 => CursorStyle::Block,
                 3..=4 => CursorStyle::Underline,
                 5..=6 => CursorStyle::Beam,
-                _ => CursorStyle::Block,
+                _ => self.default_cursor_style,
             };
             self.active_grid_mut().cursor.style = style;
             self.dirty = true;
@@ -252,6 +263,7 @@ impl Perform for Terminal {
                         }
                         grid.scrollback.clear();
                         grid.scroll_offset = 0;
+                        grid.selection = None;
                     }
                     _ => {}
                 }
@@ -435,7 +447,38 @@ impl Terminal {
                 }
             }
             1049 => self.set_alt_screen(enable, true),
+            1000 => {
+                self.mouse_mode = if enable {
+                    super::MouseMode::Normal
+                } else {
+                    super::MouseMode::Off
+                };
+            }
+            1002 => {
+                self.mouse_mode = if enable {
+                    super::MouseMode::ButtonEvent
+                } else {
+                    super::MouseMode::Off
+                };
+            }
+            1003 => {
+                self.mouse_mode = if enable {
+                    super::MouseMode::AnyEvent
+                } else {
+                    super::MouseMode::Off
+                };
+            }
+            1004 => self.focus_reporting = enable,
+            1006 => self.sgr_mouse = enable,
             2004 => self.bracketed_paste = enable,
+            2026 => {
+                self.sync_update = enable;
+                self.sync_started_at = if enable {
+                    Some(std::time::Instant::now())
+                } else {
+                    None
+                };
+            }
             _ => {}
         }
     }

@@ -7,6 +7,10 @@ use xkbcommon::xkb::{self, Keycode, Keysym, State};
 pub enum KeyAction {
     WritePty(Vec<u8>),
     ScrollLines(isize),
+    Copy,
+    Paste,
+    Zoom(f32),
+    ResetZoom,
 }
 
 #[derive(Debug, Clone)]
@@ -105,19 +109,37 @@ impl XkbInput {
         }
     }
 
+    pub fn is_shift_active(&self) -> bool {
+        self.state.as_ref().is_some_and(|state| {
+            state.mod_name_is_active(xkb::MOD_NAME_SHIFT, xkb::STATE_MODS_EFFECTIVE)
+        })
+    }
+
     pub fn set_repeat_info(&mut self, rate: i32, delay: i32) {
         self.repeat.rate_hz = rate;
         self.repeat.delay_ms = delay;
     }
 
     pub fn on_key_pressed(&mut self, evdev_key: u32, app_cursor: bool) -> Option<KeyAction> {
-        let now = Instant::now();
-        if self.repeat.rate_hz > 0 {
+        let action = self.translate_key(evdev_key, app_cursor);
+        let repeatable = !matches!(
+            action,
+            Some(
+                KeyAction::Copy
+                    | KeyAction::Paste
+                    | KeyAction::Zoom(_)
+                    | KeyAction::ResetZoom
+            )
+        );
+        if repeatable && self.repeat.rate_hz > 0 {
+            let now = Instant::now();
             self.repeat.active_key = Some(evdev_key);
             self.repeat.next_repeat_at =
                 Some(now + std::time::Duration::from_millis(self.repeat.delay_ms.max(50) as u64));
+        } else if !repeatable {
+            self.clear_repeat();
         }
-        self.translate_key(evdev_key, app_cursor)
+        action
     }
 
     pub fn on_key_released(&mut self, evdev_key: u32) {
@@ -162,6 +184,25 @@ impl XkbInput {
         let shift = state.mod_name_is_active(xkb::MOD_NAME_SHIFT, xkb::STATE_MODS_EFFECTIVE);
         let ctrl = state.mod_name_is_active(xkb::MOD_NAME_CTRL, xkb::STATE_MODS_EFFECTIVE);
         let alt = state.mod_name_is_active(xkb::MOD_NAME_ALT, xkb::STATE_MODS_EFFECTIVE);
+
+        if ctrl && shift && !alt {
+            match keysym.raw() {
+                0x63 | 0x43 => return Some(KeyAction::Copy),  // Ctrl+Shift+C
+                0x76 | 0x56 => return Some(KeyAction::Paste), // Ctrl+Shift+V
+                _ => {}
+            }
+        }
+
+        if ctrl && !alt {
+            match keysym.raw() {
+                0x2B | 0x3D | 0xFFAB => return Some(KeyAction::Zoom(1.0)),  // Ctrl + '+'/'='/KP_Add
+                0x2D if !shift => return Some(KeyAction::Zoom(-1.0)),       // Ctrl + '-'
+                0xFFAD => return Some(KeyAction::Zoom(-1.0)),               // Ctrl + KP_Subtract
+                0x30 if !shift => return Some(KeyAction::ResetZoom),        // Ctrl + '0'
+                0xFFB0 => return Some(KeyAction::ResetZoom),                // Ctrl + KP_0
+                _ => {}
+            }
+        }
 
         if shift && keysym == Keysym::Page_Up {
             return Some(KeyAction::ScrollLines(8));

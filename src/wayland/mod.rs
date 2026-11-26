@@ -1,10 +1,15 @@
+pub mod clipboard;
 pub mod input;
 
+use std::collections::HashMap;
 use std::ffi::c_void;
+use std::io::Write;
+use std::os::fd::AsFd;
 
+use wayland_client::backend::ObjectId;
 use wayland_client::protocol::{
-    wl_callback, wl_compositor, wl_keyboard, wl_output, wl_pointer, wl_registry, wl_seat,
-    wl_surface,
+    wl_callback, wl_compositor, wl_data_device, wl_data_device_manager, wl_data_offer,
+    wl_data_source, wl_keyboard, wl_output, wl_pointer, wl_registry, wl_seat, wl_surface,
 };
 use wayland_client::{Connection, Dispatch, EventQueue, Proxy, QueueHandle, WEnum, delegate_noop};
 use wayland_protocols::wp::fractional_scale::v1::client::{
@@ -18,6 +23,31 @@ use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_ba
 
 use self::input::{KeyAction, XkbInput};
 
+#[derive(Debug, Clone, Copy)]
+pub enum PointerAction {
+    Button {
+        button: u32,
+        pressed: bool,
+        x: f64,
+        y: f64,
+    },
+    Motion {
+        x: f64,
+        y: f64,
+    },
+    Scroll {
+        steps: isize,
+        x: f64,
+        y: f64,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub enum DropPayload {
+    Paths(String),
+    Text(Vec<u8>),
+}
+
 pub struct WaylandApp {
     pub connection: Connection,
     pub event_queue: EventQueue<WaylandState>,
@@ -29,6 +59,8 @@ pub struct WaylandState {
     pub compositor: Option<wl_compositor::WlCompositor>,
     pub wm_base: Option<xdg_wm_base::XdgWmBase>,
     pub seat: Option<wl_seat::WlSeat>,
+    pub data_device_manager: Option<wl_data_device_manager::WlDataDeviceManager>,
+    pub data_device: Option<wl_data_device::WlDataDevice>,
     pub decoration_manager: Option<zxdg_decoration_manager_v1::ZxdgDecorationManagerV1>,
     pub viewporter: Option<wp_viewporter::WpViewporter>,
     pub fractional_scale_manager:
@@ -42,6 +74,14 @@ pub struct WaylandState {
     pub fractional_scale: Option<wp_fractional_scale_v1::WpFractionalScaleV1>,
     pub keyboard: Option<wl_keyboard::WlKeyboard>,
     pub pointer: Option<wl_pointer::WlPointer>,
+
+    pub data_source: Option<wl_data_source::WlDataSource>,
+    pub owned_clipboard_text: String,
+    pub clipboard_offer: Option<wl_data_offer::WlDataOffer>,
+    pub dnd_offer: Option<wl_data_offer::WlDataOffer>,
+    pub dnd_serial: u32,
+    pub offer_mimes: HashMap<ObjectId, Vec<String>>,
+    pub pending_drops: Vec<(wl_data_offer::WlDataOffer, Vec<String>)>,
 
     pub configured: bool,
     pub should_close: bool,
@@ -62,7 +102,12 @@ pub struct WaylandState {
 
     pub xkb: XkbInput,
     pub app_cursor_keys: bool,
+    pub last_input_serial: u32,
+    pub pointer_x: f64,
+    pub pointer_y: f64,
     pub pending_key_actions: Vec<KeyAction>,
+    pub pending_pointer_actions: Vec<PointerAction>,
+    pub pending_focus_event: Option<bool>,
     scroll_accum: f64,
 }
 
@@ -72,6 +117,8 @@ impl WaylandState {
             compositor: None,
             wm_base: None,
             seat: None,
+            data_device_manager: None,
+            data_device: None,
             decoration_manager: None,
             viewporter: None,
             fractional_scale_manager: None,
@@ -83,6 +130,13 @@ impl WaylandState {
             fractional_scale: None,
             keyboard: None,
             pointer: None,
+            data_source: None,
+            owned_clipboard_text: String::new(),
+            clipboard_offer: None,
+            dnd_offer: None,
+            dnd_serial: 0,
+            offer_mimes: HashMap::new(),
+            pending_drops: Vec::new(),
             configured: false,
             should_close: false,
             frame_pending: false,
@@ -98,7 +152,12 @@ impl WaylandState {
             size_changed: false,
             xkb: XkbInput::new(),
             app_cursor_keys: false,
+            last_input_serial: 0,
+            pointer_x: 0.0,
+            pointer_y: 0.0,
             pending_key_actions: Vec::new(),
+            pending_pointer_actions: Vec::new(),
+            pending_focus_event: None,
             scroll_accum: 0.0,
         }
     }
@@ -112,6 +171,14 @@ impl WaylandState {
         let pw = ((self.logical_width as f64) * scale).round().max(1.0) as u32;
         let ph = ((self.logical_height as f64) * scale).round().max(1.0) as u32;
         (pw, ph)
+    }
+
+    fn ensure_data_device(&mut self, qh: &QueueHandle<Self>) {
+        if self.data_device.is_none()
+            && let (Some(mgr), Some(seat)) = (&self.data_device_manager, &self.seat)
+        {
+            self.data_device = Some(mgr.get_data_device(seat, qh, ()));
+        }
     }
 }
 
@@ -208,6 +275,101 @@ impl WaylandApp {
         }
     }
 
+    pub fn set_clipboard(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        let (Some(mgr), Some(device)) = (
+            self.state.data_device_manager.as_ref(),
+            self.state.data_device.as_ref(),
+        ) else {
+            return;
+        };
+
+        if let Some(old_source) = self.state.data_source.take() {
+            old_source.destroy();
+        }
+
+        let source = mgr.create_data_source(&self.qh, ());
+        for mime in [
+            "text/plain;charset=utf-8",
+            "text/plain",
+            "UTF8_STRING",
+            "STRING",
+            "TEXT",
+        ] {
+            source.offer(mime.to_string());
+        }
+        device.set_selection(Some(&source), self.state.last_input_serial);
+        self.state.owned_clipboard_text = text.to_string();
+        self.state.data_source = Some(source);
+        let _ = self.connection.flush();
+    }
+
+    pub fn read_clipboard_text(&mut self) -> Option<String> {
+        if self.state.data_source.is_some() && !self.state.owned_clipboard_text.is_empty() {
+            return Some(self.state.owned_clipboard_text.clone());
+        }
+
+        let offer = self.state.clipboard_offer.clone()?;
+        let mimes = self.state.offer_mimes.get(&offer.id())?.clone();
+        let mime = clipboard::pick_text_mime(&mimes)?;
+
+        let Ok((read_fd, write_fd)) = nix::unistd::pipe() else {
+            return None;
+        };
+        offer.receive(mime, write_fd.as_fd());
+        drop(write_fd);
+        let _ = self.connection.flush();
+
+        let bytes = clipboard::read_fd_with_timeout(read_fd);
+        if bytes.is_empty() {
+            None
+        } else {
+            Some(String::from_utf8_lossy(&bytes).into_owned())
+        }
+    }
+
+    pub fn take_pending_drops(&mut self, shell_quote_paths: bool) -> Vec<DropPayload> {
+        let drops: Vec<_> = self.state.pending_drops.drain(..).collect();
+        let mut payloads = Vec::new();
+
+        for (offer, mimes) in drops {
+            if let Some(mime) = clipboard::pick_dnd_mime(&mimes)
+                && let Ok((read_fd, write_fd)) = nix::unistd::pipe()
+            {
+                offer.receive(mime.clone(), write_fd.as_fd());
+                drop(write_fd);
+                let _ = self.connection.flush();
+
+                let bytes = clipboard::read_fd_with_timeout(read_fd);
+                if !bytes.is_empty() {
+                    if mime.eq_ignore_ascii_case("text/uri-list")
+                        || mime.eq_ignore_ascii_case("application/x-kde-urilist")
+                    {
+                        let paths =
+                            clipboard::parse_uri_list_for_terminal(&bytes, shell_quote_paths);
+                        if !paths.is_empty() {
+                            payloads.push(DropPayload::Paths(paths));
+                        }
+                    } else {
+                        payloads.push(DropPayload::Text(bytes));
+                    }
+                }
+            }
+
+            if offer.version() >= 3 {
+                offer.finish();
+            }
+            offer.destroy();
+        }
+
+        if !payloads.is_empty() {
+            let _ = self.connection.flush();
+        }
+        payloads
+    }
+
     /// Arms the surface for atomic commit when Vulkan vkQueuePresentKHR runs.
     pub fn prepare_frame_commit(&mut self) {
         if let Some(serial) = self.state.pending_configure_serial.take()
@@ -231,6 +393,7 @@ impl WaylandApp {
 
 delegate_noop!(WaylandState: ignore wl_compositor::WlCompositor);
 delegate_noop!(WaylandState: ignore wl_surface::WlSurface);
+delegate_noop!(WaylandState: ignore wl_data_device_manager::WlDataDeviceManager);
 delegate_noop!(WaylandState: ignore zxdg_decoration_manager_v1::ZxdgDecorationManagerV1);
 delegate_noop!(WaylandState: ignore wp_viewporter::WpViewporter);
 delegate_noop!(WaylandState: ignore wp_viewport::WpViewport);
@@ -276,6 +439,18 @@ impl Dispatch<wl_registry::WlRegistry, ()> for WaylandState {
                         qh,
                         (),
                     ));
+                    state.ensure_data_device(qh);
+                }
+                "wl_data_device_manager" => {
+                    state.data_device_manager = Some(
+                        registry.bind::<wl_data_device_manager::WlDataDeviceManager, _, _>(
+                            name,
+                            version.min(3),
+                            qh,
+                            (),
+                        ),
+                    );
+                    state.ensure_data_device(qh);
                 }
                 "wl_output" => {
                     registry.bind::<wl_output::WlOutput, _, _>(name, version.min(4), qh, ());
@@ -308,6 +483,128 @@ impl Dispatch<wl_registry::WlRegistry, ()> for WaylandState {
                 }
                 _ => {}
             }
+        }
+    }
+}
+
+impl Dispatch<wl_data_device::WlDataDevice, ()> for WaylandState {
+    fn event(
+        state: &mut Self,
+        _: &wl_data_device::WlDataDevice,
+        event: wl_data_device::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match event {
+            wl_data_device::Event::DataOffer { id } => {
+                state.offer_mimes.entry(id.id()).or_default();
+            }
+            wl_data_device::Event::Enter { serial, id, .. } => {
+                if let Some(prev) = state.dnd_offer.take() {
+                    state.offer_mimes.remove(&prev.id());
+                    prev.destroy();
+                }
+                state.dnd_serial = serial;
+                if let Some(offer) = id {
+                    let picked = state
+                        .offer_mimes
+                        .get(&offer.id())
+                        .and_then(|mimes| clipboard::pick_dnd_mime(mimes));
+                    offer.accept(serial, picked);
+                    if offer.version() >= 3 {
+                        offer.set_actions(
+                            wl_data_device_manager::DndAction::Copy,
+                            wl_data_device_manager::DndAction::Copy,
+                        );
+                    }
+                    state.dnd_offer = Some(offer);
+                }
+            }
+            wl_data_device::Event::Motion { .. } => {
+                if let Some(offer) = &state.dnd_offer {
+                    let picked = state
+                        .offer_mimes
+                        .get(&offer.id())
+                        .and_then(|mimes| clipboard::pick_dnd_mime(mimes));
+                    offer.accept(state.dnd_serial, picked);
+                }
+            }
+            wl_data_device::Event::Leave => {
+                if let Some(offer) = state.dnd_offer.take() {
+                    state.offer_mimes.remove(&offer.id());
+                    offer.destroy();
+                }
+            }
+            wl_data_device::Event::Drop => {
+                if let Some(offer) = state.dnd_offer.take() {
+                    let mimes = state.offer_mimes.remove(&offer.id()).unwrap_or_default();
+                    state.pending_drops.push((offer, mimes));
+                }
+            }
+            wl_data_device::Event::Selection { id } => {
+                let new_id = id.as_ref().map(|o| o.id());
+                if let Some(prev) = state.clipboard_offer.take()
+                    && Some(prev.id()) != new_id
+                {
+                    state.offer_mimes.remove(&prev.id());
+                    prev.destroy();
+                }
+                if id.is_some() && state.data_source.is_some() {
+                    // Selection may now belong to another client unless it matches our source.
+                    // wl_data_source::Cancelled will clear our source when overwritten externally.
+                }
+                state.clipboard_offer = id;
+            }
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<wl_data_offer::WlDataOffer, ()> for WaylandState {
+    fn event(
+        state: &mut Self,
+        offer: &wl_data_offer::WlDataOffer,
+        event: wl_data_offer::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let wl_data_offer::Event::Offer { mime_type } = event {
+            state
+                .offer_mimes
+                .entry(offer.id())
+                .or_default()
+                .push(mime_type);
+        }
+    }
+}
+
+impl Dispatch<wl_data_source::WlDataSource, ()> for WaylandState {
+    fn event(
+        state: &mut Self,
+        source: &wl_data_source::WlDataSource,
+        event: wl_data_source::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match event {
+            wl_data_source::Event::Send { fd, .. } => {
+                let mut file = std::fs::File::from(fd);
+                let _ = file.write_all(state.owned_clipboard_text.as_bytes());
+            }
+            wl_data_source::Event::Cancelled => {
+                if state
+                    .data_source
+                    .as_ref()
+                    .is_some_and(|cur| cur.id() == source.id())
+                {
+                    state.data_source = None;
+                }
+                source.destroy();
+            }
+            _ => {}
         }
     }
 }
@@ -504,6 +801,10 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandState {
             } => {
                 state.xkb.load_keymap_from_fd(fd, size);
             }
+            wl_keyboard::Event::Enter { serial, .. } => {
+                state.last_input_serial = serial;
+                state.pending_focus_event = Some(true);
+            }
             wl_keyboard::Event::Modifiers {
                 mods_depressed,
                 mods_latched,
@@ -519,22 +820,28 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandState {
                 state.xkb.set_repeat_info(rate, delay);
             }
             wl_keyboard::Event::Key {
+                serial,
                 key,
                 state: WEnum::Value(key_state),
                 ..
-            } => match key_state {
-                wl_keyboard::KeyState::Pressed => {
-                    if let Some(action) = state.xkb.on_key_pressed(key, state.app_cursor_keys) {
-                        state.pending_key_actions.push(action);
+            } => {
+                state.last_input_serial = serial;
+                match key_state {
+                    wl_keyboard::KeyState::Pressed => {
+                        if let Some(action) = state.xkb.on_key_pressed(key, state.app_cursor_keys) {
+                            state.pending_key_actions.push(action);
+                        }
                     }
+                    wl_keyboard::KeyState::Released => {
+                        state.xkb.on_key_released(key);
+                    }
+                    _ => {}
                 }
-                wl_keyboard::KeyState::Released => {
-                    state.xkb.on_key_released(key);
-                }
-                _ => {}
-            },
-            wl_keyboard::Event::Leave { .. } => {
+            }
+            wl_keyboard::Event::Leave { serial, .. } => {
+                state.last_input_serial = serial;
                 state.xkb.clear_repeat();
+                state.pending_focus_event = Some(false);
             }
             _ => {}
         }
@@ -550,22 +857,71 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandState {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
-        if let wl_pointer::Event::Axis {
-            axis: WEnum::Value(wl_pointer::Axis::VerticalScroll),
-            value,
-            ..
-        } = event
-        {
-            state.scroll_accum += value;
-            let step = 12.0;
-            while state.scroll_accum <= -step {
-                state.scroll_accum += step;
-                state.pending_key_actions.push(KeyAction::ScrollLines(3));
+        match event {
+            wl_pointer::Event::Enter {
+                serial,
+                surface_x,
+                surface_y,
+                ..
+            } => {
+                state.last_input_serial = serial;
+                state.pointer_x = surface_x;
+                state.pointer_y = surface_y;
             }
-            while state.scroll_accum >= step {
-                state.scroll_accum -= step;
-                state.pending_key_actions.push(KeyAction::ScrollLines(-3));
+            wl_pointer::Event::Motion {
+                surface_x,
+                surface_y,
+                ..
+            } => {
+                state.pointer_x = surface_x;
+                state.pointer_y = surface_y;
+                state.pending_pointer_actions.push(PointerAction::Motion {
+                    x: surface_x,
+                    y: surface_y,
+                });
             }
+            wl_pointer::Event::Button {
+                serial,
+                button,
+                state: WEnum::Value(btn_state),
+                ..
+            } => {
+                state.last_input_serial = serial;
+                state.pending_pointer_actions.push(PointerAction::Button {
+                    button,
+                    pressed: btn_state == wl_pointer::ButtonState::Pressed,
+                    x: state.pointer_x,
+                    y: state.pointer_y,
+                });
+            }
+            wl_pointer::Event::Leave { .. } => {
+                state.scroll_accum = 0.0;
+            }
+            wl_pointer::Event::Axis {
+                axis: WEnum::Value(wl_pointer::Axis::VerticalScroll),
+                value,
+                ..
+            } => {
+                state.scroll_accum += value;
+                let step = 12.0;
+                while state.scroll_accum <= -step {
+                    state.scroll_accum += step;
+                    state.pending_pointer_actions.push(PointerAction::Scroll {
+                        steps: 1,
+                        x: state.pointer_x,
+                        y: state.pointer_y,
+                    });
+                }
+                while state.scroll_accum >= step {
+                    state.scroll_accum -= step;
+                    state.pending_pointer_actions.push(PointerAction::Scroll {
+                        steps: -1,
+                        x: state.pointer_x,
+                        y: state.pointer_y,
+                    });
+                }
+            }
+            _ => {}
         }
     }
 }

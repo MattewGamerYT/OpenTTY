@@ -40,20 +40,7 @@ impl SwapchainState {
         }
         .map_err(|e| format!("get_physical_device_surface_present_modes failed: {e}"))?;
 
-        let surface_format = formats
-            .iter()
-            .copied()
-            .find(|f| {
-                f.format == vk::Format::B8G8R8A8_UNORM
-                    && f.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR
-            })
-            .or_else(|| {
-                formats
-                    .iter()
-                    .copied()
-                    .find(|f| f.format == vk::Format::R8G8B8A8_UNORM)
-            })
-            .unwrap_or(formats[0]);
+        let surface_format = choose_surface_format(&formats);
 
         // Prefer MAILBOX for low-latency tear-free presentation paced by Wayland frame callbacks.
         let present_mode = if present_modes.contains(&vk::PresentModeKHR::MAILBOX) {
@@ -214,4 +201,21 @@ pub fn create_render_pass(
 
     unsafe { device.create_render_pass(&rp_info, None) }
         .map_err(|e| format!("create_render_pass failed: {e}"))
+}
+
+pub fn choose_surface_format(formats: &[vk::SurfaceFormatKHR]) -> vk::SurfaceFormatKHR {
+    formats
+        .iter()
+        .copied()
+        .find(|f| {
+            f.format == vk::Format::B8G8R8A8_UNORM
+                && f.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR
+        })
+        .or_else(|| {
+            formats
+                .iter()
+                .copied()
+                .find(|f| f.format == vk::Format::R8G8B8A8_UNORM)
+        })
+        .unwrap_or(formats[0])
 }

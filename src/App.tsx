@@ -16,6 +16,7 @@ import termGridRs from './terminal/grid.rs?raw';
 import termParserRs from './terminal/parser.rs?raw';
 import waylandModRs from './wayland/mod.rs?raw';
 import waylandInputRs from './wayland/input.rs?raw';
+import waylandClipboardRs from './wayland/clipboard.rs?raw';
 import vulkanModRs from './vulkan/mod.rs?raw';
 import vulkanSwapchainRs from './vulkan/swapchain.rs?raw';
 import vulkanPipelineRs from './vulkan/pipeline.rs?raw';
@@ -62,13 +63,13 @@ const SOURCE_FILES: SourceFile[] = [
   {
     path: 'src/config.rs',
     subsystem: 'Core',
-    summary: 'Terminal defaults: /usr/bin/fish, font fallbacks, padding, scrollback, and RGBA8 palette.',
+    summary: 'Defaults and optional ~/.config/opentty/opentty.conf loader for fonts, cursor, clipboard, mouse, and Breeze palette.',
     content: configRs,
   },
   {
     path: 'src/pty.rs',
     subsystem: 'Core',
-    summary: 'Non-blocking openpty backend with xterm-256color/truecolor env and TIOCSWINSZ SIGWINCH.',
+    summary: 'Non-blocking openpty backend with queued POLLOUT writes, xterm-256color/truecolor env, and TIOCSWINSZ SIGWINCH.',
     content: ptyRs,
   },
   {
@@ -80,14 +81,20 @@ const SOURCE_FILES: SourceFile[] = [
   {
     path: 'src/wayland/mod.rs',
     subsystem: 'Wayland',
-    summary: 'Native Wayland client: KWin Breeze SSD, fractional scaling, viewporter, frame callbacks.',
+    summary: 'Native Wayland client: KWin Breeze SSD, fractional scaling, viewporter, wl_data_device clipboard/DnD, and pointer events.',
     content: waylandModRs,
   },
   {
     path: 'src/wayland/input.rs',
     subsystem: 'Wayland',
-    summary: 'xkbcommon keymap loading, repeat timer state, and CSI/SS3/UTF-8 key encoding.',
+    summary: 'xkbcommon keymap loading, repeat timer, Ctrl+Shift+C/V, font zoom, and CSI/SS3/UTF-8 key encoding.',
     content: waylandInputRs,
+  },
+  {
+    path: 'src/wayland/clipboard.rs',
+    subsystem: 'Wayland',
+    summary: 'Non-blocking Wayland pipe reader, MIME negotiation, file:// URI decoding, shell quoting, bracketed paste, and base64.',
+    content: waylandClipboardRs,
   },
   {
     path: 'src/vulkan/mod.rs',

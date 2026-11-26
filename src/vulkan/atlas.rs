@@ -41,6 +41,7 @@ pub struct GlyphAtlas {
     cursor_y: u32,
     shelf_height: u32,
     needs_initial_layout: bool,
+    saturated: bool,
     pending_uploads: Vec<PendingUpload>,
 }
 
@@ -146,6 +147,7 @@ impl GlyphAtlas {
             cursor_y: 1,
             shelf_height: 0,
             needs_initial_layout: true,
+            saturated: false,
             pending_uploads: Vec::new(),
         })
     }
@@ -156,7 +158,14 @@ impl GlyphAtlas {
         self.cursor_y = 1;
         self.shelf_height = 0;
         self.staging_cursor = 0;
+        self.saturated = false;
         self.pending_uploads.clear();
+    }
+
+    pub fn clear_if_saturated(&mut self) {
+        if self.saturated {
+            self.clear();
+        }
     }
 
     pub fn get_or_insert(&mut self, font: &mut FontEngine, key: GlyphKey) -> AtlasEntry {
@@ -188,22 +197,23 @@ impl GlyphAtlas {
             self.shelf_height = 0;
         }
 
+        let empty = AtlasEntry {
+            uv_rect: [0.0, 0.0, 0.0, 0.0],
+            width: 0.0,
+            height: 0.0,
+            xmin: 0.0,
+            ymin: 0.0,
+        };
+
         if self.cursor_y + padded_h >= ATLAS_SIZE {
-            // Reset atlas cleanly if saturated across scale changes.
-            self.clear();
+            // Defer atlas reset until the start of the next frame so glyphs already queued this frame stay valid.
+            self.saturated = true;
+            return empty;
         }
 
         let byte_len = (w * h) as u64;
         let aligned_cursor = (self.staging_cursor + 3) & !3;
         if aligned_cursor + byte_len > self.staging_capacity {
-            // Staging buffer saturated within a single frame: flush-safe reset on overflow.
-            let empty = AtlasEntry {
-                uv_rect: [0.0, 0.0, 0.0, 0.0],
-                width: 0.0,
-                height: 0.0,
-                xmin: 0.0,
-                ymin: 0.0,
-            };
             return empty;
         }
 

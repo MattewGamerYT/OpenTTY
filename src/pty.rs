@@ -14,6 +14,8 @@ nix::ioctl_write_ptr_bad!(tiocswinsz, libc::TIOCSWINSZ, Winsize);
 pub struct Pty {
     master: File,
     child: Child,
+    write_buf: Vec<u8>,
+    write_offset: usize,
 }
 
 impl Pty {
@@ -131,7 +133,12 @@ impl Pty {
         let child = cmd.spawn()?;
         let master = File::from(master_fd);
 
-        Ok(Self { master, child })
+        Ok(Self {
+            master,
+            child,
+            write_buf: Vec::with_capacity(4096),
+            write_offset: 0,
+        })
     }
 
     pub fn as_fd(&self) -> BorrowedFd<'_> {
@@ -156,27 +163,49 @@ impl Pty {
         match self.master.read(buf) {
             Ok(n) => Ok(n),
             Err(err) if err.kind() == io::ErrorKind::WouldBlock => Ok(0),
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => Ok(0),
             Err(err) => Err(err),
         }
     }
 
-    pub fn write_all(&mut self, data: &[u8]) -> io::Result<()> {
-        let mut offset = 0;
-        while offset < data.len() {
-            match self.master.write(&data[offset..]) {
+    pub fn has_pending_writes(&self) -> bool {
+        self.write_offset < self.write_buf.len()
+    }
+
+    /// Enqueues bytes for the PTY and flushes as much as possible without blocking.
+    /// Remaining bytes are drained via POLLOUT in the main loop so large pastes never deadlock.
+    pub fn queue_write(&mut self, data: &[u8]) -> io::Result<()> {
+        if data.is_empty() {
+            return Ok(());
+        }
+        self.write_buf.extend_from_slice(data);
+        self.flush_writes()
+    }
+
+    pub fn flush_writes(&mut self) -> io::Result<()> {
+        while self.write_offset < self.write_buf.len() {
+            match self.master.write(&self.write_buf[self.write_offset..]) {
                 Ok(0) => {
                     return Err(io::Error::new(
                         io::ErrorKind::WriteZero,
                         "failed to write to PTY master",
                     ));
                 }
-                Ok(n) => offset += n,
-                Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
-                    std::thread::yield_now();
-                }
+                Ok(n) => self.write_offset += n,
+                Err(err) if err.kind() == io::ErrorKind::WouldBlock => break,
                 Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
                 Err(err) => return Err(err),
             }
+        }
+        if self.write_offset >= self.write_buf.len() {
+            self.write_buf.clear();
+            self.write_offset = 0;
+            if self.write_buf.capacity() > 64 * 1024 {
+                self.write_buf.shrink_to(4096);
+            }
+        } else if self.write_offset > 32 * 1024 {
+            self.write_buf.drain(..self.write_offset);
+            self.write_offset = 0;
         }
         Ok(())
     }
